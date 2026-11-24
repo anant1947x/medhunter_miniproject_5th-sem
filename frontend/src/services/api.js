@@ -20,15 +20,17 @@ function authHeaders() {
 async function handleResponse(res) {
   const data = await res.json();
   if (!res.ok) {
-    const message = data.message || "Something went wrong";
-    throw new Error(message);
+    const error = new Error(data.message || "Something went wrong");
+    error.status = res.status;
+    throw error;
   }
   return data;
 }
 
-export async function get(path) {
+export async function get(path, signal) {
   const res = await fetch(`${BASE_URL}${path}`, {
     headers: { ...authHeaders() },
+    signal,
   });
   return handleResponse(res);
 }

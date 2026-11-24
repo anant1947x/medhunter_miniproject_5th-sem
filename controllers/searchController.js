@@ -2,11 +2,48 @@ const mongoose = require("mongoose");
 const Medicine = require("../models/Medicine");
 const Shop = require("../models/Shop");
 
+const medicineNamePattern = (name) =>
+  name.trim().toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+exports.suggestMedicines = async (req, res) => {
+  try {
+    const { name } = req.query;
+
+    if (typeof name !== "string" || name.trim().length < 2) {
+      return res.json({ suggestions: [] });
+    }
+
+    const catalog = mongoose.connection.useDb(
+      process.env.MEDICINE_CATALOG_DB || "test",
+      { useCache: true }
+    );
+    const medicines = await catalog.collection("medicines").aggregate([
+      {
+        $match: {
+          name: { $regex: medicineNamePattern(name), $options: "i" },
+        },
+      },
+      {
+        $group: {
+          _id: { $toLower: "$name" },
+          name: { $min: "$name" },
+        },
+      },
+      { $sort: { _id: 1 } },
+      { $limit: 8 },
+    ]).toArray();
+
+    res.json({ suggestions: medicines.map((medicine) => medicine.name) });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 exports.searchMedicine = async (req, res) => {
   try {
     const { name, lat, lng, maxDistance } = req.query;
 
-    if (!name) {
+    if (typeof name !== "string" || !name.trim()) {
       return res.status(400).json({ message: "Medicine name is required" });
     }
     if (!lat || !lng) {
@@ -19,9 +56,8 @@ exports.searchMedicine = async (req, res) => {
     const userLng = parseFloat(lng);
     const maxDist = parseInt(maxDistance) || 10000;
 
-    const searchTerm = name.toLowerCase().trim();
     const matchingMedicines = await Medicine.find({
-      nameNormalized: { $regex: searchTerm, $options: "i" },
+      nameNormalized: { $regex: medicineNamePattern(name), $options: "i" },
       stock: { $gt: 0 },
     }).lean();
 

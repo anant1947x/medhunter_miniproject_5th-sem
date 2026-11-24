@@ -1,24 +1,117 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import { get } from "../../services/api";
 
+function readSearchHistory(key, fallback = []) {
+  if (!key) return fallback;
+
+  try {
+    const history = JSON.parse(localStorage.getItem(key));
+    if (Array.isArray(history)) {
+      return history.filter((name) => typeof name === "string").slice(0, 10);
+    }
+  } catch {
+    // Keep the current history if browser storage cannot be read.
+  }
+
+  return fallback;
+}
+
 export default function UserDashboard() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const historyKey = user?._id ? `medhunter_search_history_${user._id}` : null;
 
   const [searchName, setSearchName] = useState("");
+  const [suggestions, setSuggestions] = useState([]);
+  const [suggestionMessage, setSuggestionMessage] = useState("");
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [activeSuggestion, setActiveSuggestion] = useState(-1);
   const [results, setResults] = useState([]);
   const [searchCount, setSearchCount] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [searchHistory, setSearchHistory] = useState([]);
+  const [searchHistory, setSearchHistory] = useState(() => readSearchHistory(historyKey));
 
   const [userLocation, setUserLocation] = useState({
     lat: null,
     lng: null,
     display: "Location not fetched yet",
   });
+
+  useEffect(() => {
+    const name = searchName.trim();
+    if (!showSuggestions || name.length < 2) return;
+
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      try {
+        const data = await get(
+          `/search/suggestions?name=${encodeURIComponent(name)}`,
+          controller.signal
+        );
+        if (controller.signal.aborted) return;
+        setSuggestions(data.suggestions);
+        setSuggestionMessage(data.suggestions.length ? "" : "No matching medicines.");
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        setSuggestionMessage(
+          err.status === 401
+            ? "Sign in again to see medicine suggestions."
+            : "Could not load medicine suggestions."
+        );
+      }
+    }, 250);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [searchName, showSuggestions]);
+
+  const closeSuggestions = () => {
+    setShowSuggestions(false);
+    setSuggestions([]);
+    setSuggestionMessage("");
+    setActiveSuggestion(-1);
+  };
+
+  const handleNameChange = (e) => {
+    setSearchName(e.target.value);
+    setSuggestions([]);
+    setSuggestionMessage("");
+    setActiveSuggestion(-1);
+    setShowSuggestions(true);
+  };
+
+  const selectMedicine = (name) => {
+    setSearchName(name);
+    closeSuggestions();
+  };
+
+  const handleNameKeyDown = (e) => {
+    if (e.nativeEvent.isComposing) return;
+
+    if (e.key === "Escape") {
+      closeSuggestions();
+    }
+    if (suggestions.length === 0) return;
+
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const nextIndex = e.key === "ArrowDown"
+        ? Math.min(activeSuggestion + 1, suggestions.length - 1)
+        : Math.max(activeSuggestion - 1, 0);
+      setActiveSuggestion(nextIndex);
+      document.getElementById(`medicine-suggestion-${nextIndex}`)
+        ?.scrollIntoView({ block: "nearest" });
+    }
+    if (e.key === "Enter" && activeSuggestion >= 0) {
+      e.preventDefault();
+      selectMedicine(suggestions[activeSuggestion]);
+    }
+  };
 
   const handleGetLocation = () => {
     if (!navigator.geolocation) {
@@ -49,9 +142,11 @@ export default function UserDashboard() {
 
   const handleSearch = async (e) => {
     e.preventDefault();
+    closeSuggestions();
     setError("");
+    const name = searchName.trim();
 
-    if (!searchName.trim()) {
+    if (!name) {
       setError("Please enter a medicine name");
       return;
     }
@@ -64,23 +159,29 @@ export default function UserDashboard() {
 
     try {
       const data = await get(
-        `/search?name=${encodeURIComponent(searchName.trim())}&lat=${userLocation.lat}&lng=${userLocation.lng}&maxDistance=10000`
+        `/search?name=${encodeURIComponent(name)}&lat=${userLocation.lat}&lng=${userLocation.lng}&maxDistance=10000`
       );
       setResults(data.results || []);
       setSearchCount(data.count || 0);
 
-      if (!searchHistory.includes(searchName.trim())) {
-        setSearchHistory((prev) => [searchName.trim(), ...prev].slice(0, 10));
+      const history = readSearchHistory(historyKey, searchHistory);
+      const updatedHistory = history.includes(name)
+        ? history
+        : [name, ...history].slice(0, 10);
+      setSearchHistory(updatedHistory);
+
+      if (historyKey) {
+        try {
+          localStorage.setItem(historyKey, JSON.stringify(updatedHistory));
+        } catch {
+          // Keep the history visible for this session if saving fails.
+        }
       }
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  };
-
-  const handleHistoryClick = (name) => {
-    setSearchName(name);
   };
 
   const handleLogout = () => {
@@ -138,13 +239,53 @@ export default function UserDashboard() {
               </p>
 
               <form onSubmit={handleSearch} className="mt-5 space-y-4">
-                <input
-                  type="text"
-                  placeholder="Enter medicine name"
-                  value={searchName}
-                  onChange={(e) => setSearchName(e.target.value)}
-                  className="w-full rounded-2xl border border-[#d7e8e1] bg-[#f9fcfb] px-4 py-3 outline-none focus:border-[#1f6f5b]"
-                />
+                <div className="relative">
+                  <input
+                    type="text"
+                    role="combobox"
+                    aria-label="Medicine name"
+                    aria-autocomplete="list"
+                    aria-expanded={suggestions.length > 0}
+                    aria-controls={suggestions.length > 0 ? "medicine-suggestions" : undefined}
+                    aria-activedescendant={activeSuggestion >= 0 ? `medicine-suggestion-${activeSuggestion}` : undefined}
+                    autoComplete="off"
+                    placeholder="Enter medicine name"
+                    value={searchName}
+                    onChange={handleNameChange}
+                    onFocus={() => setShowSuggestions(true)}
+                    onBlur={closeSuggestions}
+                    onKeyDown={handleNameKeyDown}
+                    className="w-full rounded-2xl border border-[#d7e8e1] bg-[#f9fcfb] px-4 py-3 outline-none focus:border-[#1f6f5b]"
+                  />
+
+                  {suggestions.length > 0 && (
+                    <ul
+                      id="medicine-suggestions"
+                      role="listbox"
+                      aria-label="Medicine suggestions"
+                      className="absolute inset-x-0 top-full z-10 mt-1 max-h-60 overflow-y-auto rounded-2xl border border-[#d7e8e1] bg-white py-1 shadow-lg"
+                    >
+                      {suggestions.map((name, index) => (
+                        <li
+                          key={name}
+                          id={`medicine-suggestion-${index}`}
+                          role="option"
+                          aria-selected={index === activeSuggestion}
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => selectMedicine(name)}
+                          className="cursor-pointer px-4 py-3 text-sm hover:bg-[#dff4ea] aria-selected:bg-[#dff4ea]"
+                        >
+                          {name}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {suggestionMessage && (
+                    <p role="status" className="mt-2 px-1 text-sm text-slate-600">
+                      {suggestionMessage}
+                    </p>
+                  )}
+                </div>
 
                 <button
                   type="submit"
@@ -160,10 +301,10 @@ export default function UserDashboard() {
               <div className="rounded-[2rem] bg-white p-6 shadow-sm">
                 <h2 className="text-xl font-bold">Search History</h2>
                 <div className="mt-4 space-y-3 text-sm text-slate-600">
-                  {searchHistory.map((name, index) => (
+                  {searchHistory.map((name) => (
                     <button
-                      key={index}
-                      onClick={() => handleHistoryClick(name)}
+                      key={name}
+                      onClick={() => selectMedicine(name)}
                       className="block w-full rounded-2xl bg-[#f4faf7] px-4 py-3 text-left transition hover:bg-[#dff4ea]"
                     >
                       {name}
